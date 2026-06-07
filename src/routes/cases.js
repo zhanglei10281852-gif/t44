@@ -108,8 +108,12 @@ router.put("/:id/approve", async (req, res) => {
   const { action, reason } = req.body;
   if (action === "approve") {
     await pool.execute(
-      "UPDATE cases SET status = ?, approve_reason = ? WHERE id = ?",
+      "UPDATE cases SET status = ?, approve_reason = ?, approved_at = NOW() WHERE id = ?",
       ["已批准", reason || null, req.params.id],
+    );
+    await pool.execute(
+      "INSERT INTO case_progress (case_id, progress_date, description) VALUES (?, CURDATE(), ?)",
+      [req.params.id, "案件审批通过"],
     );
     res.json({ message: "审批通过" });
   } else if (action === "reject") {
@@ -141,12 +145,16 @@ router.put("/:id/assign", async (req, res) => {
   if (lawyer.status !== "可接案")
     return res.status(400).json({ error: "该律师当前不可接案" });
   await pool.execute(
-    "UPDATE cases SET lawyer_id = ?, status = ? WHERE id = ?",
+    "UPDATE cases SET lawyer_id = ?, status = ?, assigned_at = NOW() WHERE id = ?",
     [lawyer_id, "已指派", req.params.id],
   );
   await pool.execute(
     "UPDATE lawyers SET status = ?, case_count = case_count + 1 WHERE id = ?",
     ["案件中", lawyer_id],
+  );
+  await pool.execute(
+    "INSERT INTO case_progress (case_id, progress_date, description) VALUES (?, CURDATE(), ?)",
+    [req.params.id, "律师指派完成"],
   );
   res.json({ message: "律师指派成功" });
 });
@@ -158,10 +166,14 @@ router.put("/:id/start", async (req, res) => {
   if (!c) return res.status(404).json({ error: "案件不存在" });
   if (c.status !== "已指派")
     return res.status(400).json({ error: "只有已指派状态可以开始办理" });
-  await pool.execute("UPDATE cases SET status = ? WHERE id = ?", [
-    "办理中",
-    req.params.id,
-  ]);
+  await pool.execute(
+    "UPDATE cases SET status = ?, started_at = NOW() WHERE id = ?",
+    ["办理中", req.params.id],
+  );
+  await pool.execute(
+    "INSERT INTO case_progress (case_id, progress_date, description) VALUES (?, CURDATE(), ?)",
+    [req.params.id, "案件开始办理"],
+  );
   res.json({ message: "案件开始办理" });
 });
 
@@ -175,17 +187,70 @@ router.put("/:id/close", async (req, res) => {
   if (!c) return res.status(404).json({ error: "案件不存在" });
   if (c.status !== "办理中")
     return res.status(400).json({ error: "只有办理中状态可以结案" });
-  await pool.execute("UPDATE cases SET status = ?, result = ? WHERE id = ?", [
-    "已结案",
-    result,
-    req.params.id,
-  ]);
+  await pool.execute(
+    "UPDATE cases SET status = ?, result = ?, closed_at = NOW() WHERE id = ?",
+    ["已结案", result, req.params.id],
+  );
   if (c.lawyer_id) {
     await pool.execute("UPDATE lawyers SET status = '可接案' WHERE id = ?", [
       c.lawyer_id,
     ]);
   }
+  await pool.execute(
+    "UPDATE supervisions SET status = '已解除', resolved_at = NOW() WHERE case_id = ? AND status != '已解除'",
+    [req.params.id],
+  );
+  await pool.execute(
+    "INSERT INTO case_progress (case_id, progress_date, description) VALUES (?, CURDATE(), ?)",
+    [req.params.id, "案件已结案"],
+  );
   res.json({ message: "案件已结案" });
+});
+
+router.get("/:id/progress", async (req, res) => {
+  const [[c]] = await pool.execute("SELECT id FROM cases WHERE id = ?", [
+    req.params.id,
+  ]);
+  if (!c) return res.status(404).json({ error: "案件不存在" });
+
+  const [progress] = await pool.execute(
+    "SELECT * FROM case_progress WHERE case_id = ? ORDER BY progress_date, created_at",
+    [req.params.id],
+  );
+  res.json(progress);
+});
+
+router.post("/:id/progress", async (req, res) => {
+  const { progress_date, description, created_by } = req.body;
+  if (!description) {
+    return res.status(400).json({ error: "进展描述为必填" });
+  }
+  const [[c]] = await pool.execute(
+    "SELECT id, status FROM cases WHERE id = ?",
+    [req.params.id],
+  );
+  if (!c) return res.status(404).json({ error: "案件不存在" });
+  if (c.status === "已结案" || c.status === "已驳回") {
+    return res.status(400).json({ error: "已结案或已驳回的案件不能添加进度" });
+  }
+
+  const date = progress_date || new Date().toISOString().split("T")[0];
+  const [result] = await pool.execute(
+    "INSERT INTO case_progress (case_id, progress_date, description, created_by) VALUES (?, ?, ?, ?)",
+    [req.params.id, date, description, created_by || null],
+  );
+  res.status(201).json({ id: result.insertId, message: "进度添加成功" });
+});
+
+router.delete("/progress/:id", async (req, res) => {
+  const [result] = await pool.execute(
+    "DELETE FROM case_progress WHERE id = ?",
+    [req.params.id],
+  );
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ error: "进度记录不存在" });
+  }
+  res.json({ message: "进度删除成功" });
 });
 
 module.exports = router;
