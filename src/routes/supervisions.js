@@ -349,13 +349,18 @@ router.post("/:id/reassign", async (req, res) => {
     ]);
   }
 
-  await pool.execute("UPDATE cases SET lawyer_id = ? WHERE id = ?", [
-    new_lawyer_id,
-    caseItem.id,
-  ]);
+  await pool.execute(
+    "UPDATE cases SET lawyer_id = ?, is_serious_overtime = 0 WHERE id = ?",
+    [new_lawyer_id, caseItem.id],
+  );
   await pool.execute(
     "UPDATE lawyers SET status = '案件中', case_count = case_count + 1 WHERE id = ?",
     [new_lawyer_id],
+  );
+
+  await pool.execute(
+    "UPDATE supervisions SET status = '已解除', resolved_at = NOW() WHERE id = ?",
+    [req.params.id],
   );
 
   await pool.execute(
@@ -382,7 +387,7 @@ router.post("/:id/extend", async (req, res) => {
   }
 
   const [[caseItem]] = await pool.execute(
-    "SELECT id, special_deadline FROM cases WHERE id = ?",
+    "SELECT id, status, case_type, special_deadline, created_at, approved_at, assigned_at, started_at FROM cases WHERE id = ?",
     [supervision.case_id],
   );
   if (!caseItem) return res.status(404).json({ error: "案件不存在" });
